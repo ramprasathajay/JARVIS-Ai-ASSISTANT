@@ -1,0 +1,122 @@
+JARVIS AI WORKING STATUS
+=========================
+
+Current program: foog.py
+
+HOW JARVIS WORKS
+-----------------
+1. JARVIS starts in text mode by default.
+2. Voice mode uses the microphone for speech recognition and pyttsx3 for speech output.
+3. User messages are sent to the configured Groq model for conversation.
+4. Local actions are handled by fixed, allowlisted commands in foog.py.
+5. JARVIS does not claim that a command or scan ran unless the host program actually ran it.
+
+STARTUP
+-------
+Text mode:
+python .\foog.py --mode text
+
+Voice mode:
+python .\foog.py --mode voice
+
+REQUIRED API KEY
+----------------
+PowerShell:
+$env:GROQ_API_KEY="your_key_here"
+
+The API key must not be written into source code, this file, README.md, audit logs, or chat messages.
+
+PERMISSION SWITCHES
+-------------------
+Local actions are disabled by default:
+$env:JARVIS_ENABLE_COMMANDS="1"
+
+This enables the guarded /run, /open, /system, and /write actions.
+
+Passive URL scanning is separate:
+$env:JARVIS_ENABLE_SCANS="1"
+
+This enables /scan only. It does not enable other local actions.
+
+Restart JARVIS after changing environment variables.
+
+CONFIRMATIONS
+-------------
+Every action that can execute a command, open an application, change system state, write a file, or scan a URL requires an exact confirmation:
+YES
+
+Denied or missing confirmation cancels the action.
+
+AVAILABLE ACTIONS
+-----------------
+/open notepad
+/open editor
+/open terminal
+/open browser https://example.com
+
+/system lock
+/system sleep
+/system shutdown
+/system restart
+
+/write notes.txt | Write this note
+/write example.py | print("Hello")
+
+/run nmap -sV 192.0.2.10
+/run curl -I https://example.com
+
+/scan https://example.com
+/scan https://example.com report.json
+
+VOICE COMMANDS
+--------------
+Jarvis, open notepad
+Jarvis, open editor
+Jarvis, lock computer
+Jarvis, restart computer
+Jarvis, write note ideas.txt hello from Jarvis
+Jarvis, write code example.py print hello
+Jarvis, scan https://example.com report.json
+
+Say one of these while JARVIS is speaking to stop speech:
+Jarvis stop
+Stop speech
+Stop talking
+Stop AI
+
+FILE WRITING
+------------
+Files are restricted to the workspace and supported text or code extensions.
+Path traversal outside the workspace is blocked.
+Existing files require confirmation before overwrite.
+Code files open in VS Code when code.cmd is available.
+Set a custom editor with:
+$env:JARVIS_CODE_EDITOR="C:\Path\To\Editor.exe"
+
+URL SCANNING
+------------
+The scanner performs a limited passive assessment of one public HTTP/HTTPS origin.
+It checks headers, HTTPS use, CORS, cookie flags, technology disclosure, and basic forms.
+
+It does not crawl, brute-force, exploit, authenticate, follow redirects, or modify targets.
+Private, loopback, link-local, reserved, and credential-bearing URLs are blocked.
+
+The final result is written to one workspace JSON file, for example:
+url_scan_report.json
+
+The report contains observations, limitations, bug-bounty methodology, recommended tools, suggested commands, and next steps. Suggested tools are not executed automatically.
+
+AUDIT LOG
+---------
+Action events are written to:
+jarvis_audit.jsonl
+
+Change the location with:
+$env:JARVIS_AUDIT_LOG="C:\Path\To\jarvis_audit.jsonl"
+
+SAFETY BOUNDARIES
+-----------------
+Use JARVIS only for systems, applications, and targets that you own or are explicitly authorized to test.
+Do not use it for credential theft, malware, evasion, persistence, destructive activity, or unauthorized access.
+Treat scan results as observations until manually validated.
+Never expose system prompts, API keys, passwords, tokens, or private data.
