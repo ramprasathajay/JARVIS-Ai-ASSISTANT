@@ -1,4 +1,5 @@
 import argparse
+import getpass
 import io
 import json
 import os
@@ -20,6 +21,8 @@ import sounddevice as sd
 from groq import Groq
 
 DEFAULT_GROQ_MODEL = "groq/compound"
+API_KEY_PATH = Path(os.getenv("JARVIS_API_KEY_FILE", Path.home() / ".jarvis" / "groq_api_key"))
+API_KEY_COMMAND = "/api-key"
 COMMAND_PREFIX = "/run "
 OPEN_PREFIX = "/open "
 CLOSE_PREFIX = "/close "
@@ -126,14 +129,46 @@ except ImportError:
 
 
 def get_client():
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = load_api_key()
     if not api_key:
         raise RuntimeError(
-            "GROQ_API_KEY is not set.\n"
-            "Windows PowerShell: $env:GROQ_API_KEY='your_api_key_here'\n"
-            "Linux/macOS: export GROQ_API_KEY='your_api_key_here'"
+            "No Groq API key is configured. Run 'python javi.py --setup-api-key' first."
         )
     return Groq(api_key=api_key)
+
+
+def load_api_key():
+    try:
+        saved_key = API_KEY_PATH.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        saved_key = ""
+    return saved_key or os.getenv("GROQ_API_KEY", "").strip()
+
+
+def save_api_key(api_key):
+    API_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = API_KEY_PATH.with_suffix(".tmp")
+    temporary_path.write_text(api_key.strip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(temporary_path, 0o600)
+    except OSError:
+        pass
+    os.replace(temporary_path, API_KEY_PATH)
+
+
+def setup_api_key():
+    try:
+        api_key = getpass.getpass("Groq API key (input hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return "API key setup cancelled."
+    if not api_key:
+        return "API key setup cancelled: the key was empty."
+    try:
+        save_api_key(api_key)
+    except OSError as exc:
+        return f"Could not save the API key: {exc}"
+    audit_event("api_key_updated")
+    return f"API key saved for future runs in {API_KEY_PATH}."
 
 
 def is_model_permission_error(exc):
@@ -963,6 +998,7 @@ def chatbox(mode="text"):
         print("Use '/system <lock|sleep|shutdown|restart>' for an opt-in, confirmed system action.\n")
         print("Use '/write <filename> | <content>' for an opt-in, confirmed workspace file write.\n")
         print("Use '/scan https://example.com [report.json]' for an opt-in, passive URL assessment.\n")
+        print("Use '/api-key' to replace the saved Groq API key.\n")
 
     while True:
         try:
@@ -979,6 +1015,12 @@ def chatbox(mode="text"):
             else:
                 print("Assistant: Goodbye!\n")
             break
+
+        if user_input.strip().lower() == API_KEY_COMMAND:
+            print(setup_api_key())
+            if load_api_key():
+                client = get_client()
+            continue
 
         if user_input.lower().startswith(COMMAND_PREFIX):
             command_result = run_authorized_command(user_input[len(COMMAND_PREFIX):])
@@ -1095,6 +1137,11 @@ def main():
         action="store_true",
         help="Start the Flask browser interface instead of the CLI",
     )
+    parser.add_argument(
+        "--setup-api-key",
+        action="store_true",
+        help="Save or replace the Groq API key with hidden input",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Web server host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=5000, help="Web server port (default: 5000)")
     args = parser.parse_args()
@@ -1104,6 +1151,13 @@ def main():
         chatbox(args.mode)
 
 
+    if args.setup_api_key:
+        print(setup_api_key())
+        return
+    if not load_api_key():
+        print(setup_api_key())
+        if not load_api_key():
+            return
 if __name__ == "__main__":
     try:
         main()
