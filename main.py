@@ -1,4 +1,5 @@
 import argparse
+import getpass
 import io
 import json
 import os
@@ -20,12 +21,16 @@ import sounddevice as sd
 from groq import Groq
 
 DEFAULT_GROQ_MODEL = "groq/compound"
+API_KEY_PATH = Path(os.getenv("JARVIS_API_KEY_FILE", Path.home() / ".jarvis" / "groq_api_key"))
+API_KEY_COMMAND = "/api-key"
 COMMAND_PREFIX = "/run "
 OPEN_PREFIX = "/open "
 CLOSE_PREFIX = "/close "
 SYSTEM_PREFIX = "/system "
 WRITE_PREFIX = "/write "
 SCAN_PREFIX = "/scan "
+BROWSE_PREFIX = "/browse "
+DOWNLOAD_PREFIX = "/download "
 AUDIT_LOG_PATH = os.getenv("JARVIS_AUDIT_LOG", "jarvis_audit.jsonl")
 WORKSPACE_ROOT = Path(os.getenv("JARVIS_WORKSPACE_ROOT", os.getcwd())).resolve()
 SCAN_TIMEOUT = max(3, min(int(os.getenv("JARVIS_SCAN_TIMEOUT", "10")), 30))
@@ -119,14 +124,46 @@ else:
 
 
 def get_client():
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = load_api_key()
     if not api_key:
         raise RuntimeError(
-            "GROQ_API_KEY is not set.\n"
-            "Windows PowerShell: $env:GROQ_API_KEY='your_api_key_here'\n"
-            "Linux/macOS: export GROQ_API_KEY='your_api_key_here'"
+            "No Groq API key is configured. Run 'python foog.py --setup-api-key' first."
         )
     return Groq(api_key=api_key)
+
+
+def load_api_key():
+    try:
+        saved_key = API_KEY_PATH.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        saved_key = ""
+    return saved_key or os.getenv("GROQ_API_KEY", "").strip()
+
+
+def save_api_key(api_key):
+    API_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = API_KEY_PATH.with_suffix(".tmp")
+    temporary_path.write_text(api_key.strip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(temporary_path, 0o600)
+    except OSError:
+        pass
+    os.replace(temporary_path, API_KEY_PATH)
+
+
+def setup_api_key():
+    try:
+        api_key = getpass.getpass("Groq API key (input hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return "API key setup cancelled."
+    if not api_key:
+        return "API key setup cancelled: the key was empty."
+    try:
+        save_api_key(api_key)
+    except OSError as exc:
+        return f"Could not save the API key: {exc}"
+    audit_event("api_key_updated")
+    return f"API key saved for future runs in {API_KEY_PATH}."
 
 
 def is_model_permission_error(exc):
@@ -243,7 +280,9 @@ def open_authorized_application(request):
             "restart JARVIS to enable the guarded /open command."
         )
 
-    request, _ = strip_confirmation_token(request)
+    request, confirmed = strip_confirmation_token(request)
+    if not confirmed:
+        return "Confirmation required. Repeat the command with a trailing 'yes'."
     parts = request.strip().split(maxsplit=1)
     if not parts:
         allowed = ", ".join(sorted(ALLOWED_APPLICATIONS))
@@ -287,6 +326,98 @@ def open_authorized_application(request):
     except OSError as exc:
         audit_event("application_error", application=application, error=type(exc).__name__)
         return f"Could not start {application}: {exc}"
+
+
+def _public_url(raw_url):
+    if not re.match(r"^https?://[^\s]+$", raw_url, re.IGNORECASE):
+        return None, "Use a public HTTP or HTTPS URL."
+    parsed = urlsplit(raw_url)
+    if parsed.username or parsed.password or not parsed.hostname:
+        return None, "URLs with embedded credentials are not accepted."
+    try:
+        resolved_ip = ipaddress.ip_address(socket.gethostbyname(parsed.hostname))
+    except (socket.gaierror, ValueError):
+        return None, f"Could not resolve the host: {parsed.hostname}"
+    if resolved_ip.is_private or resolved_ip.is_loopback or resolved_ip.is_link_local or resolved_ip.is_reserved:
+        return None, "Private, loopback, link-local, and reserved targets are blocked."
+    return raw_url, None
+
+
+def browse_authorized_url(request):
+    """Open one public URL in the default browser after explicit confirmation."""
+    if os.getenv("JARVIS_ENABLE_COMMANDS", "0").lower() not in {"1", "true", "yes"}:
+        audit_event("browser_blocked", reason="commands_disabled")
+        return "Browser actions are disabled. Set JARVIS_ENABLE_COMMANDS=1 and restart JARVIS."
+    request, confirmed = strip_confirmation_token(request)
+    if not confirmed:
+        return "Confirmation required. Repeat the command with a trailing 'yes'."
+    raw_url = request.strip()
+    target_url, error = _public_url(raw_url)
+    if error:
+        return f"Browser usage: /browse https://example.com yes. {error}"
+    if not webbrowser.open(target_url, new=2):
+        return "The browser did not accept the URL."
+    audit_event("browser_opened", target=target_url)
+    return f"Opened {target_url} in the default browser."
+
+
+def download_authorized_file(request):
+    """Download one public URL into the user's Downloads folder after confirmation."""
+    if os.getenv("JARVIS_ENABLE_COMMANDS", "0").lower() not in {"1", "true", "yes"}:
+        audit_event("download_blocked", reason="commands_disabled")
+        return "Downloads are disabled. Set JARVIS_ENABLE_COMMANDS=1 and restart JARVIS."
+
+    request, confirmed = strip_confirmation_token(request)
+    if not confirmed:
+        return "Confirmation required. Repeat the command with a trailing 'yes'."
+    parts = request.strip().split(maxsplit=1)
+    if not parts:
+        return "Usage: /download https://example.com/file.pdf [filename] yes"
+    target_url, error = _public_url(parts[0])
+    if error:
+        return f"Download usage: /download https://example.com/file.pdf [filename] yes. {error}"
+
+    filename = Path(urlsplit(target_url).path).name or "download.bin"
+    if len(parts) == 2 and parts[1].strip():
+        filename = parts[1].strip()
+    if Path(filename).name != filename or filename in {".", ".."}:
+        return "The download filename must be a simple name without folders."
+
+    downloads_path = Path.home() / "Downloads"
+    destination = (downloads_path / filename).resolve()
+    try:
+        destination.relative_to(downloads_path.resolve())
+    except ValueError:
+        return "Downloads must stay inside the user's Downloads folder."
+
+    temporary_path = destination.with_suffix(destination.suffix + ".part")
+    try:
+        downloads_path.mkdir(parents=True, exist_ok=True)
+        with build_opener(NoRedirectHandler).open(target_url, timeout=SCAN_TIMEOUT) as response:
+            content_length = int(response.headers.get("Content-Length", "0") or 0)
+            if content_length > 25 * 1024 * 1024:
+                return "Downloads larger than 25 MB are blocked."
+            bytes_written = 0
+            with temporary_path.open("wb") as output:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    bytes_written += len(chunk)
+                    if bytes_written > 25 * 1024 * 1024:
+                        temporary_path.unlink(missing_ok=True)
+                        return "Downloads larger than 25 MB are blocked."
+                    output.write(chunk)
+        os.replace(temporary_path, destination)
+        audit_event("download_completed", filename=filename, bytes_written=bytes_written)
+        return f"Downloaded {filename} to your Downloads folder."
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        audit_event("download_error", filename=filename, error=type(exc).__name__)
+        return f"Download failed: {exc}"
 
 
 def close_authorized_application(request):
@@ -596,6 +727,19 @@ def parse_voice_action(user_input):
             request += f" {scan_match.group(2)}"
         return "scan", request
 
+    browse_match = re.fullmatch(r"(?:browse|explore) (https?://\S+) yes", normalized)
+    if browse_match:
+        return "browse", f"{browse_match.group(1)} yes"
+
+    download_match = re.fullmatch(
+        r"download (https?://\S+)(?: ([a-z0-9_.-]+))? yes", normalized
+    )
+    if download_match:
+        request = download_match.group(1)
+        if download_match.group(2):
+            request += f" {download_match.group(2)}"
+        return "download", f"{request} yes"
+
     write_match = re.fullmatch(r"write (?:note|notepad|content|code) ([^ ]+) (.+)", normalized)
     if write_match:
         return "write", f"{write_match.group(1)} | {write_match.group(2)}"
@@ -604,11 +748,12 @@ def parse_voice_action(user_input):
     if close_match and close_match.group(1) in CLOSEABLE_APPLICATIONS:
         return "close", close_match.group(1)
 
-    open_match = re.fullmatch(r"(?:jarvis[ ,]+)?open ((?:browser|web|[a-z0-9_-]+))(?: (https?://\S+))?", normalized)
+    open_match = re.fullmatch(r"(?:jarvis[ ,]+)?open ((?:browser|web|[a-z0-9_-]+))(?: (https?://\S+))? yes", normalized)
     if open_match and open_match.group(1) in {"browser", "web", *[app for app in ALLOWED_APPLICATIONS if app not in {"browser", "web"}] }:
         request = open_match.group(1)
         if open_match.group(2):
             request += f" {open_match.group(2)}"
+        request += " yes"
         return "open", request
 
     system_phrases = {
@@ -846,7 +991,23 @@ def chatbox(mode="text"):
                 "assumptions, observations, hypotheses, and validated results. For findings, "
                 "include affected asset, evidence, reproduction or PoC guidance, severity, "
                 "impact, confidence, and remediation. Maintain the approved scope and prior "
-                "findings throughout the conversation. Be concise, technical, and clear."
+                "findings throughout the conversation. Be concise, technical, and clear.\n\n"
+                "RESPONSE BEHAVIOR: Sound like a calm, capable, human-friendly assistant. "
+                "Acknowledge the user's goal briefly before answering when it helps. Use plain "
+                "language, natural contractions, and a respectful conversational tone; do not "
+                "sound robotic, overly formal, or excessively enthusiastic. Match the user's "
+                "level of technical knowledge and ask one focused clarifying question when a "
+                "missing detail changes the answer. Give the direct answer first, then the "
+                "smallest useful explanation or next step. Be honest about uncertainty and "
+                "say when you have not run or verified something. Never pretend to see, hear, "
+                "open, scan, or change anything unless the host program provides evidence.\n\n"
+                "CODE ANSWERS: When writing code, use a fenced code block with the language "
+                "name, keep the example complete and runnable when practical, use descriptive "
+                "names, and include only brief comments for non-obvious logic. Explain where "
+                "the code belongs, how to run it, and any required packages or environment "
+                "variables. Preserve the user's existing framework and style. For a debugging "
+                "request, identify the likely cause, show the smallest focused fix, and name "
+                "the check used to verify it."
             ),
         }
     ]
@@ -861,6 +1022,9 @@ def chatbox(mode="text"):
         print("Use '/system <lock|sleep|shutdown|restart>' for an opt-in, confirmed system action.\n")
         print("Use '/write <filename> | <content>' for an opt-in, confirmed workspace file write.\n")
         print("Use '/scan https://example.com [report.json]' for an opt-in, passive URL assessment.\n")
+        print("Use '/browse https://example.com yes' to open a browser page after confirmation.\n")
+        print("Use '/download https://example.com/file.pdf [filename] yes' to download into Downloads.\n")
+        print("Use '/api-key' to replace the saved Groq API key.\n")
 
     while True:
         try:
@@ -877,6 +1041,16 @@ def chatbox(mode="text"):
             else:
                 print("Assistant: Goodbye!\n")
             break
+
+        if user_input.strip().lower() == API_KEY_COMMAND:
+            result = setup_api_key()
+            if voice:
+                voice.speak(result)
+            else:
+                print(f"API key setup: {result}\n")
+            if load_api_key():
+                client = get_client()
+            continue
 
         if user_input.lower().startswith(COMMAND_PREFIX):
             command_result = run_authorized_command(user_input[len(COMMAND_PREFIX):])
@@ -926,10 +1100,32 @@ def chatbox(mode="text"):
                 print(f"Scan result:\n{scan_result}\n")
             continue
 
+        if user_input.lower().startswith(BROWSE_PREFIX):
+            browse_result = browse_authorized_url(user_input[len(BROWSE_PREFIX):])
+            if voice:
+                voice.speak(browse_result)
+            else:
+                print(f"Browser result:\n{browse_result}\n")
+            continue
+
+        if user_input.lower().startswith(DOWNLOAD_PREFIX):
+            download_result = download_authorized_file(user_input[len(DOWNLOAD_PREFIX):])
+            if voice:
+                voice.speak(download_result)
+            else:
+                print(f"Download result:\n{download_result}\n")
+            continue
+
         if voice:
             action, request = parse_voice_action(user_input)
             if action == "scan":
                 voice.speak(scan_authorized_url(request))
+                continue
+            if action == "browse":
+                voice.speak(browse_authorized_url(request))
+                continue
+            if action == "download":
+                voice.speak(download_authorized_file(request))
                 continue
             if action == "open":
                 voice.speak(open_authorized_application(request))
@@ -996,7 +1192,19 @@ def main():
         default="text",
         help="Use typed input or microphone input (default: text)",
     )
+    parser.add_argument(
+        "--setup-api-key",
+        action="store_true",
+        help="Save or replace the Groq API key with hidden input",
+    )
     args = parser.parse_args()
+    if args.setup_api_key:
+        print(setup_api_key())
+        return
+    if not load_api_key():
+        print(setup_api_key())
+        if not load_api_key():
+            return
     chatbox(args.mode)
 
 
@@ -1006,3 +1214,5 @@ if __name__ == "__main__":
     except RuntimeError as exc:
         print(f"\nERROR: {exc}\n")
         print("Install dependencies with: pip install -r requirements.txt")
+
+        
