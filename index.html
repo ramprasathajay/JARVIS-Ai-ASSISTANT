@@ -7,7 +7,7 @@
   <title>JARVIS AI Assistant</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
-    :root { --bg: #02070b; --panel: rgba(5, 18, 25, .78); --line: rgba(54, 191, 215, .3); --cyan: #64e8ff; --cyan-dim: #3a9caf; --amber: #ffb85c; --text: #d9f7ff; --muted: #6e9aa5; }
+    :root { --bg: #02070b; --panel: rgba(5, 18, 25, .78); --line: rgba(54, 191, 215, .3); --cyan: #64e8ff; --cyan-dim: #3a9caf; --amber: #ffb85c; --text: #d9f7ff; --muted: #6e9aa5; --green: #82f7bd; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; overflow-x: hidden; color: var(--text); background: #02070b url('https://wallpapers.com/images/hd/iron-man-jarvis-desktop-7kyecxg439heuzid.jpg') center / cover fixed; font: 15px/1.5 'Chakra Petch', sans-serif; }
     body::before { content: ''; position: fixed; inset: 0; pointer-events: none; background: linear-gradient(90deg, rgba(2, 9, 14, .98) 0%, rgba(2, 12, 18, .88) 43%, rgba(2, 7, 11, .58)), repeating-linear-gradient(0deg, transparent 0 3px, rgba(93, 225, 255, .025) 4px 5px); }
@@ -35,6 +35,9 @@
     .composer { border: 1px solid var(--cyan-dim); background: var(--panel); box-shadow: 0 0 35px rgba(25, 146, 172, .1); }
     textarea { display: block; width: 100%; min-height: 82px; padding: 15px; border: 0; outline: 0; resize: vertical; color: var(--text); background: transparent; font: inherit; }
     textarea::placeholder { color: #477681; }
+    #file-input { display: none; }
+    .attachments { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 12px 10px; }
+    .attachment { padding: 5px 8px; border: 1px solid rgba(130, 247, 189, .45); color: var(--green); font: 10px 'Space Mono', monospace; }
     .composer-bar { display: flex; justify-content: space-between; gap: 10px; padding: 9px; border-top: 1px solid rgba(54, 191, 215, .22); background: rgba(2, 10, 15, .7); }
     .buttons { display: flex; flex-wrap: wrap; gap: 7px; }
     button { padding: 8px 12px; border: 1px solid rgba(100, 232, 255, .35); color: var(--text); background: transparent; cursor: pointer; font: 11px 'Space Mono', monospace; }
@@ -70,7 +73,7 @@
         <div>
           <div class="label">Assistant / 01</div>
           <h1>Think clearly.<br>Work precisely.</h1>
-          <p class="subline">Text and voice chat with JARVIS.</p>
+          <p class="subline">Chat, inspect files, understand images, and draft code with Groq.</p>
         </div>
         <div id="mode" class="mode">TEXT READY</div>
       </header>
@@ -79,9 +82,13 @@
       </section>
       <section class="composer">
         <textarea id="message" aria-label="Message" placeholder="Ask JARVIS..."></textarea>
+        <div id="attachments" class="attachments" aria-live="polite"></div>
         <div class="composer-bar">
           <div class="buttons">
-            <button id="listen" type="button">Speak</button>
+            <input id="file-input" type="file" multiple accept=".txt,.md,.py,.js,.ts,.tsx,.jsx,.html,.css,.json,.csv,.xml,.yaml,.yml,.pdf,.docx,.png,.jpg,.jpeg,.webp">
+            <button id="attach" type="button">Attach</button>
+            <button id="code" type="button">Code draft</button>
+            <button id="listen" type="button" aria-pressed="false">Tap to speak</button>
             <button id="stop" type="button">Stop voice</button>
             <button id="clear" type="button">Clear</button>
           </div>
@@ -105,12 +112,23 @@
   </div>
   <script>
     const history = [];
+    const selectedFiles = [];
     const messages = document.getElementById("messages");
     const input = document.getElementById("message");
     const status = document.getElementById("status");
     const mode = document.getElementById("mode");
+    const listenButton = document.getElementById("listen");
     let voiceMode = false;
     let activeRecognition = null;
+
+    function stopListening() {
+      voiceMode = false;
+      if (activeRecognition) activeRecognition.abort();
+      activeRecognition = null;
+      listenButton.textContent = "Tap to speak";
+      listenButton.setAttribute("aria-pressed", "false");
+      if (mode.textContent === "LISTENING") mode.textContent = "TEXT READY";
+    }
 
     function addMessage(role, text) {
       const empty = messages.querySelector(".empty");
@@ -157,15 +175,19 @@
       status.textContent = "Thinking...";
       mode.textContent = "PROCESSING";
       try {
+        const form = new FormData();
+        form.append("messages", JSON.stringify(history));
+        selectedFiles.forEach(file => form.append("files", file));
         const response = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: history })
+          body: form
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || "Request failed");
         addMessage("assistant", data.reply);
         history.push({ role: "assistant", content: data.reply });
+        selectedFiles.length = 0;
+        renderAttachments();
         if (shouldSpeak) speakReply(data.reply);
         status.textContent = "Ready. Web mode does not execute local system commands.";
         mode.textContent = "TEXT READY";
@@ -179,6 +201,47 @@
     }
 
     document.getElementById("send").addEventListener("click", () => send(input.value));
+    function renderAttachments() {
+      const container = document.getElementById("attachments");
+      container.innerHTML = "";
+      selectedFiles.forEach(file => {
+        const item = document.createElement("span");
+        item.className = "attachment";
+        item.textContent = `${file.name} · ${(file.size / 1024).toFixed(0)} KB`;
+        container.appendChild(item);
+      });
+    }
+    document.getElementById("attach").addEventListener("click", () => document.getElementById("file-input").click());
+    document.getElementById("file-input").addEventListener("change", event => {
+      selectedFiles.push(...Array.from(event.target.files));
+      renderAttachments();
+      status.textContent = `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} ready to send.`;
+      event.target.value = "";
+    });
+    document.getElementById("code").addEventListener("click", async () => {
+      const requestText = input.value.trim();
+      if (!requestText) {
+        status.textContent = "Describe the code you want drafted first.";
+        input.focus();
+        return;
+      }
+      status.textContent = "Drafting code...";
+      try {
+        const response = await fetch("/api/code", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ request: requestText })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Code draft failed");
+        addMessage("user", `Code draft request: ${requestText}`);
+        addMessage("assistant", data.draft);
+        input.value = "";
+        status.textContent = "Code draft ready. Review it before using it.";
+      } catch (error) {
+        status.textContent = `Code draft failed: ${error.message}`;
+      }
+    });
     input.addEventListener("keydown", event => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
@@ -192,41 +255,56 @@
     });
     document.getElementById("stop").addEventListener("click", () => {
       if ("speechSynthesis" in window) speechSynthesis.cancel();
-      if (activeRecognition) activeRecognition.abort();
-      voiceMode = false;
-      activeRecognition = null;
+      stopListening();
       mode.textContent = "TEXT READY";
       status.textContent = "Voice output stopped.";
     });
-    document.getElementById("listen").addEventListener("click", () => {
+    listenButton.addEventListener("click", () => {
       const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!Recognition) {
         status.textContent = "Voice input is not supported by this browser.";
         return;
       }
-      if (activeRecognition) activeRecognition.abort();
+      if (activeRecognition) {
+        stopListening();
+        status.textContent = "Listening stopped.";
+        return;
+      }
       voiceMode = true;
       const recognition = new Recognition();
       activeRecognition = recognition;
       recognition.lang = "en-US";
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
+      recognition.continuous = true;
+      listenButton.textContent = "Tap to stop listening";
+      listenButton.setAttribute("aria-pressed", "true");
       mode.textContent = "LISTENING";
-      status.textContent = "Listening...";
-      recognition.onresult = event => send(event.results[0][0].transcript, true);
+      status.textContent = "Listening continuously. Tap the button to stop.";
+      recognition.onresult = event => {
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          if (event.results[index].isFinal) send(event.results[index][0].transcript, true);
+        }
+      };
       recognition.onerror = event => {
+        if (!voiceMode && event.error === "aborted") return;
         const message = event.error === "network"
           ? "Voice input network error. Browser speech recognition needs internet access; type your message instead."
           : `Voice input error: ${event.error}`;
         status.textContent = message;
         mode.textContent = "TEXT READY";
-        voiceMode = false;
-        activeRecognition = null;
+        stopListening();
       };
       recognition.onend = () => {
         if (activeRecognition === recognition) {
-          activeRecognition = null;
-          if (mode.textContent === "LISTENING") mode.textContent = "TEXT READY";
+          if (voiceMode) {
+            try {
+              recognition.start();
+            } catch (error) {
+              status.textContent = `Voice input could not restart: ${error.message}`;
+              stopListening();
+            }
+          }
         }
       };
       recognition.start();
