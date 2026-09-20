@@ -189,8 +189,8 @@
         selectedFiles.length = 0;
         renderAttachments();
         if (shouldSpeak) speakReply(data.reply);
-        status.textContent = "Ready. Web mode does not execute local system commands.";
-        mode.textContent = "TEXT READY";
+        status.textContent = shouldSpeak ? "Reply ready. Speaking..." : "Ready. Web mode does not execute local system commands.";
+        if (!shouldSpeak) mode.textContent = "TEXT READY";
       } catch (error) {
         addMessage("assistant", `Error: ${error.message}`);
         status.textContent = error.message === "Failed to fetch"
@@ -283,7 +283,9 @@
       status.textContent = "Listening continuously. Tap the button to stop.";
       recognition.onresult = event => {
         for (let index = event.resultIndex; index < event.results.length; index += 1) {
-          if (event.results[index].isFinal) send(event.results[index][0].transcript, true);
+          if (event.results[index].isFinal) {
+            send(event.results[index][0].transcript, true);
+          }
         }
       };
       recognition.onerror = event => {
