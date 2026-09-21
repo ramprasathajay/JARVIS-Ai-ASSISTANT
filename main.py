@@ -24,15 +24,26 @@ DEFAULT_GROQ_MODEL = "groq/compound"
 API_KEY_PATH = Path(os.getenv("JARVIS_API_KEY_FILE", Path.home() / ".jarvis" / "groq_api_key"))
 API_KEY_COMMAND = "/api-key"
 COMMAND_PREFIX = "/run "
+TERMINAL_PREFIX = "/terminal "
 OPEN_PREFIX = "/open "
 CLOSE_PREFIX = "/close "
 SYSTEM_PREFIX = "/system "
 WRITE_PREFIX = "/write "
+WRITE_CODE_PREFIX = "/write-code "
+CONCEPT_PREFIX = "/concept "
+TYPE_MESSAGE_PREFIX = "/type-message "
+READ_MESSAGES_COMMAND = "/read-messages"
+PLUGINS_COMMAND = "/plugins"
+APP_PREFIX = "/app "
+SETUP_PREFIX = "/setup "
 SCAN_PREFIX = "/scan "
 BROWSE_PREFIX = "/browse "
 DOWNLOAD_PREFIX = "/download "
+VOICE_MODE_COMMAND = "/voice"
+TEXT_MODE_COMMAND = "/text"
 AUDIT_LOG_PATH = os.getenv("JARVIS_AUDIT_LOG", "jarvis_audit.jsonl")
 WORKSPACE_ROOT = Path(os.getenv("JARVIS_WORKSPACE_ROOT", os.getcwd())).resolve()
+MESSAGE_LOG_PATH = Path(os.getenv("JARVIS_MESSAGE_LOG", WORKSPACE_ROOT / "jarvis_messages.jsonl")).resolve()
 SCAN_TIMEOUT = max(3, min(int(os.getenv("JARVIS_SCAN_TIMEOUT", "10")), 30))
 ALLOWED_PENTEST_TOOLS = {
     "curl",
@@ -44,14 +55,41 @@ ALLOWED_PENTEST_TOOLS = {
     "traceroute",
     "tracert",
     "whois",
+    "code",
+    "git",
+    "node",
+    "npm",
+    "npx",
+    "python",
+    "python3",
+    "pytest",
+    "where",
+    "dir",
 }
 ALLOWED_APPLICATIONS = {
     "browser": None,
     "web": None,
+    "whatsapp": None,
+    "instagram": None,
     "notepad": {
         "Windows": ["notepad.exe"],
         "Darwin": ["open", "-a", "TextEdit"],
         "Linux": ["gedit"],
+    },
+    "wordpad": {
+        "Windows": ["write.exe"],
+        "Darwin": ["open", "-a", "TextEdit"],
+        "Linux": ["gedit"],
+    },
+    "excel": {
+        "Windows": ["excel.exe"],
+        "Darwin": ["open", "-a", "Microsoft Excel"],
+        "Linux": ["libreoffice", "--calc"],
+    },
+    "powerpoint": {
+        "Windows": ["powerpnt.exe"],
+        "Darwin": ["open", "-a", "Microsoft PowerPoint"],
+        "Linux": ["libreoffice", "--impress"],
     },
     "editor": {
         "Windows": ["code.cmd"],
@@ -79,10 +117,17 @@ ALLOWED_APPLICATIONS = {
         "Linux": ["wireshark"],
     },
 }
+WEB_APPLICATION_URLS = {
+    "whatsapp": "https://web.whatsapp.com/",
+    "instagram": "https://www.instagram.com/",
+}
 CLOSEABLE_APPLICATIONS = {
     "browser": ["msedge.exe", "chrome.exe", "firefox.exe"],
     "web": ["msedge.exe", "chrome.exe", "firefox.exe"],
     "notepad": ["notepad.exe"],
+    "wordpad": ["wordpad.exe", "write.exe"],
+    "excel": ["EXCEL.EXE"],
+    "powerpoint": ["POWERPNT.EXE"],
     "editor": ["Code.exe"],
     "terminal": ["WindowsTerminal.exe", "wt.exe"],
     "burp": ["burpsuite.exe"],
@@ -296,7 +341,11 @@ def open_authorized_application(request):
         allowed = ", ".join(sorted(ALLOWED_APPLICATIONS))
         return f"Application '{application}' is not allowed. Available applications: {allowed}."
 
-    if application == "browser":
+    if application in WEB_APPLICATION_URLS:
+        if argument:
+            return f"{application} does not accept a URL argument; use the named app only."
+        argument = WEB_APPLICATION_URLS[application]
+    elif application == "browser":
         if not argument or not re.match(r"^https?://[^\s]+$", argument, re.IGNORECASE):
             return "Browser usage: /open browser https://example.com"
     else:
@@ -304,7 +353,7 @@ def open_authorized_application(request):
             return "Only browser accepts an argument; application launches use a named app."
 
     try:
-        if application == "browser":
+        if application in WEB_APPLICATION_URLS or application == "browser":
             webbrowser.open(argument, new=2)
             return f"Opened {argument} in the default browser."
 
@@ -453,6 +502,119 @@ def close_authorized_application(request):
         return f"Closed {application}."
     audit_event("application_close_error", application=application, error="not_running")
     return f"{application} is not running."
+
+
+def type_authorized_message(request):
+    """Store a local message for the assistant's message plugin."""
+    if os.getenv("JARVIS_ENABLE_COMMANDS", "0").lower() not in {"1", "true", "yes"}:
+        audit_event("message_blocked", reason="commands_disabled")
+        return "Message typing is disabled. Set JARVIS_ENABLE_COMMANDS=1 and restart JARVIS."
+
+    request = request.strip()
+    if not request:
+        return "Usage: /type-message <message>"
+    if len(request) > 2000:
+        return "Messages are limited to 2000 characters."
+    try:
+        MESSAGE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with MESSAGE_LOG_PATH.open("a", encoding="utf-8") as message_file:
+            message_file.write(json.dumps({"timestamp": time.time(), "message": request}) + "\n")
+        audit_event("message_typed", length=len(request))
+        return "Message typed and stored locally."
+    except OSError as exc:
+        return f"Could not store the message: {exc}"
+
+
+def read_authorized_messages():
+    """Read recent locally stored messages without contacting an external service."""
+    if not MESSAGE_LOG_PATH.exists():
+        return "No locally stored messages."
+    try:
+        messages = []
+        for line in MESSAGE_LOG_PATH.read_text(encoding="utf-8").splitlines()[-20:]:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("message"):
+                messages.append(record["message"])
+        return "\n".join(messages) if messages else "No locally stored messages."
+    except OSError as exc:
+        return f"Could not read messages: {exc}"
+
+
+def list_plugin_controls():
+    return (
+        "Available system plugins:\n"
+        "/app open <browser|whatsapp|instagram|notepad|wordpad|excel|powerpoint|editor|terminal> [url] yes\n"
+        "/app close <browser|notepad|wordpad|excel|powerpoint|editor|terminal>\n"
+        "/app setup game <project-name>\n"
+        "/type-message <message>\n"
+        "/read-messages\n"
+        "/write-code <filename> | <code content>\n"
+        "/concept <coding topic>\n"
+        "/setup game <project-name>\n"
+        "/terminal <approved command>\n"
+        "/voice or /text (switch input mode)\n"
+        "/write <filename> | <code or text>"
+    )
+
+
+def write_code_plugin(request):
+    """Write source code using the existing guarded workspace writer."""
+    if "|" not in request:
+        return "Usage: /write-code <filename> | <code content>"
+    file_name, content = request.split("|", 1)
+    if Path(file_name.strip()).suffix.lower() not in {
+        ".c", ".cpp", ".cs", ".css", ".go", ".html", ".java", ".js", ".jsx",
+        ".py", ".rs", ".ts", ".tsx", ".vue", ".xml",
+    }:
+        return "Use a supported code extension such as .py, .js, .ts, .html, or .css."
+    return write_authorized_content(request)
+
+
+def coding_concept(topic):
+    topic = topic.strip()
+    if not topic:
+        return "Usage: /concept <coding topic>"
+    return (
+        f"Coding concept: {topic}\n"
+        "1. Define the input and expected output.\n"
+        "2. Break the behavior into small functions.\n"
+        "3. Implement the simplest working version.\n"
+        "4. Add a focused test and handle invalid input."
+    )
+
+
+def setup_app_project(request):
+    """Create a small local game-design project without downloading or executing code."""
+    if os.getenv("JARVIS_ENABLE_COMMANDS", "0").lower() not in {"1", "true", "yes"}:
+        return "Project setup is disabled. Set JARVIS_ENABLE_COMMANDS=1 and restart JARVIS."
+    parts = request.strip().split(maxsplit=1)
+    if len(parts) != 2 or parts[0].lower() not in {"game", "game-design"}:
+        return "Usage: /setup game <project-name>"
+    project_name = parts[1].strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,48}", project_name):
+        return "Project name must use letters, numbers, hyphens, or underscores."
+    project_root = (WORKSPACE_ROOT / project_name).resolve()
+    try:
+        project_root.relative_to(WORKSPACE_ROOT.resolve())
+    except ValueError:
+        return "Project setup must stay inside the workspace."
+    files = {
+        "README.md": f"# {project_name}\n\nGame design project created by JARVIS.\n",
+        "index.html": "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Game</title><link rel=\"stylesheet\" href=\"style.css\"></head><body><canvas id=\"game\" width=800 height=450></canvas><script src=\"game.js\"></script></body></html>\n",
+        "style.css": "body { margin: 0; background: #101820; display: grid; place-items: center; min-height: 100vh; } canvas { border: 2px solid #f2aa4c; background: #1b2a41; }\n",
+        "game.js": "const canvas = document.querySelector('#game');\nconst context = canvas.getContext('2d');\nconst player = { x: 380, y: 210, size: 24, speed: 4 };\nconst keys = new Set();\naddEventListener('keydown', event => keys.add(event.key.toLowerCase()));\naddEventListener('keyup', event => keys.delete(event.key.toLowerCase()));\nfunction frame() { if (keys.has('arrowleft') || keys.has('a')) player.x -= player.speed; if (keys.has('arrowright') || keys.has('d')) player.x += player.speed; if (keys.has('arrowup') || keys.has('w')) player.y -= player.speed; if (keys.has('arrowdown') || keys.has('s')) player.y += player.speed; player.x = Math.max(0, Math.min(canvas.width - player.size, player.x)); player.y = Math.max(0, Math.min(canvas.height - player.size, player.y)); context.clearRect(0, 0, canvas.width, canvas.height); context.fillStyle = '#f2aa4c'; context.fillRect(player.x, player.y, player.size, player.size); requestAnimationFrame(frame); }\nframe();\n",
+    }
+    try:
+        project_root.mkdir(parents=True, exist_ok=True)
+        for relative_name, content in files.items():
+            (project_root / relative_name).write_text(content, encoding="utf-8")
+        audit_event("project_created", project=str(project_root), kind="game")
+        return f"Created game project {project_name} with {len(files)} starter files in {project_root}."
+    except OSError as exc:
+        return f"Could not create project: {exc}"
 
 
 def control_authorized_system(request):
@@ -720,6 +882,10 @@ def parse_voice_action(user_input):
     """Convert only simple, allowlisted spoken actions into guarded commands."""
     normalized = re.sub(r"[^a-z0-9:/._ -]", "", user_input.lower()).strip()
     normalized = re.sub(r"^jarvis[ ,]+", "", normalized)
+    if normalized in {"voice mode", "switch to voice", "switch to voice mode"}:
+        return "mode", "voice"
+    if normalized in {"text mode", "switch to text", "switch to text mode"}:
+        return "mode", "text"
     scan_match = re.fullmatch(r"scan (https?://\S+)(?: ([a-z0-9_.-]+\.json))?", normalized)
     if scan_match:
         request = scan_match.group(1)
@@ -740,9 +906,32 @@ def parse_voice_action(user_input):
             request += f" {download_match.group(2)}"
         return "download", f"{request} yes"
 
+    write_code_match = re.fullmatch(r"write code ([^ ]+) (.+)", normalized)
+    if write_code_match:
+        return "write-code", f"{write_code_match.group(1)} | {write_code_match.group(2)}"
     write_match = re.fullmatch(r"write (?:note|notepad|content|code) ([^ ]+) (.+)", normalized)
     if write_match:
         return "write", f"{write_match.group(1)} | {write_match.group(2)}"
+    concept_match = re.fullmatch(r"(?:coding )?concept (.+)", normalized)
+    if concept_match:
+        return "concept", concept_match.group(1)
+
+    type_match = re.fullmatch(r"(?:type|send) message (.+)", normalized)
+    if type_match:
+        return "type-message", type_match.group(1)
+    if normalized in {"read messages", "read message", "show messages", "check messages"}:
+        return "read-messages", ""
+
+    setup_match = re.fullmatch(r"setup (?:a )?(?:game|game design) ([a-z0-9_-]+)", normalized)
+    if setup_match:
+        return "setup", f"game {setup_match.group(1)}"
+    app_setup_match = re.fullmatch(r"app setup (?:a )?(?:game|game design) ([a-z0-9_-]+)", normalized)
+    if app_setup_match:
+        return "setup", f"game {app_setup_match.group(1)}"
+    if normalized.startswith("terminal "):
+        return "terminal", normalized[len("terminal "):].strip()
+    if normalized.startswith("run "):
+        return "terminal", normalized[len("run "):].strip()
 
     close_match = re.fullmatch(r"(?:close|quit|exit) ([a-z0-9_-]+)", normalized)
     if close_match and close_match.group(1) in CLOSEABLE_APPLICATIONS:
@@ -1019,11 +1208,15 @@ def chatbox(mode="text"):
         print("Use '/run <command>' for an opt-in, confirmed reconnaissance command.\n")
         print("Use '/open <app> [url]' for an opt-in, confirmed local application launch.\n")
         print("Use '/close <app>' to close an allowlisted local application.\n")
+        print("Use '/app open|close <app> [url]' for the unified app control plugin.\n")
+        print("Use '/type-message <message>' or '/read-messages' for local message controls.\n")
+        print("Use '/plugins' to list the available system plugins.\n")
         print("Use '/system <lock|sleep|shutdown|restart>' for an opt-in, confirmed system action.\n")
         print("Use '/write <filename> | <content>' for an opt-in, confirmed workspace file write.\n")
         print("Use '/scan https://example.com [report.json]' for an opt-in, passive URL assessment.\n")
         print("Use '/browse https://example.com yes' to open a browser page after confirmation.\n")
         print("Use '/download https://example.com/file.pdf [filename] yes' to download into Downloads.\n")
+        print("Use '/voice' or '/text' to switch input mode without restarting.\n")
         print("Use '/api-key' to replace the saved Groq API key.\n")
 
     while True:
@@ -1034,6 +1227,30 @@ def chatbox(mode="text"):
 
         if not user_input:
             continue
+
+        voice_action, voice_request = parse_voice_action(user_input) if voice else (None, None)
+        lowered_input = user_input.strip().lower()
+        requested_mode = None
+        if lowered_input in {VOICE_MODE_COMMAND, "voice mode", "switch to voice", "switch to voice mode"}:
+            requested_mode = "voice"
+        elif lowered_input in {TEXT_MODE_COMMAND, "text mode", "switch to text", "switch to text mode"}:
+            requested_mode = "text"
+        elif voice_action == "mode":
+            requested_mode = voice_request
+
+        if requested_mode:
+            if requested_mode == "voice" and voice is None:
+                try:
+                    voice = VoiceIO()
+                    voice.speak("Voice mode enabled.")
+                except RuntimeError as exc:
+                    print(f"Voice mode unavailable: {exc}")
+                continue
+            if requested_mode == "text" and voice is not None:
+                voice.speak("Text mode enabled.")
+                voice = None
+                print("Text mode enabled. Type your command.")
+                continue
 
         if user_input.lower() in {"quit", "exit", "bye"}:
             if voice:
@@ -1060,12 +1277,45 @@ def chatbox(mode="text"):
                 print(f"Command result:\n{command_result}\n")
             continue
 
+        if user_input.lower().startswith(TERMINAL_PREFIX):
+            terminal_result = run_authorized_command(user_input[len(TERMINAL_PREFIX):])
+            if voice:
+                voice.speak(terminal_result)
+            else:
+                print(f"Terminal result:\n{terminal_result}\n")
+            continue
+
+        if user_input.lower().startswith(SETUP_PREFIX):
+            setup_result = setup_app_project(user_input[len(SETUP_PREFIX):])
+            if voice:
+                voice.speak(setup_result)
+            else:
+                print(f"Setup result:\n{setup_result}\n")
+            continue
+
         if user_input.lower().startswith(OPEN_PREFIX):
             launch_result = open_authorized_application(user_input[len(OPEN_PREFIX):])
             if voice:
                 voice.speak(launch_result)
             else:
                 print(f"Application result:\n{launch_result}\n")
+            continue
+
+        if user_input.lower().startswith(APP_PREFIX):
+            app_request = user_input[len(APP_PREFIX):].strip()
+            app_parts = app_request.split(maxsplit=1)
+            if not app_parts or app_parts[0].lower() not in {"open", "close", "setup"}:
+                app_result = "Usage: /app open <application> [url] yes, /app close <application>, or /app setup game <name>"
+            elif app_parts[0].lower() == "open":
+                app_result = open_authorized_application(app_parts[1] if len(app_parts) == 2 else "")
+            elif app_parts[0].lower() == "close":
+                app_result = close_authorized_application(app_parts[1] if len(app_parts) == 2 else "")
+            else:
+                app_result = setup_app_project(app_parts[1] if len(app_parts) == 2 else "")
+            if voice:
+                voice.speak(app_result)
+            else:
+                print(f"App plugin result:\n{app_result}\n")
             continue
 
         if user_input.lower().startswith(CLOSE_PREFIX):
@@ -1090,6 +1340,46 @@ def chatbox(mode="text"):
                 voice.speak(write_result)
             else:
                 print(f"Write result:\n{write_result}\n")
+            continue
+
+        if user_input.lower().startswith(WRITE_CODE_PREFIX):
+            code_result = write_code_plugin(user_input[len(WRITE_CODE_PREFIX):])
+            if voice:
+                voice.speak(code_result)
+            else:
+                print(f"Code result:\n{code_result}\n")
+            continue
+
+        if user_input.lower().startswith(CONCEPT_PREFIX):
+            concept_result = coding_concept(user_input[len(CONCEPT_PREFIX):])
+            if voice:
+                voice.speak(concept_result)
+            else:
+                print(f"Concept:\n{concept_result}\n")
+            continue
+
+        if user_input.lower().startswith(TYPE_MESSAGE_PREFIX):
+            message_result = type_authorized_message(user_input[len(TYPE_MESSAGE_PREFIX):])
+            if voice:
+                voice.speak(message_result)
+            else:
+                print(f"Message result:\n{message_result}\n")
+            continue
+
+        if user_input.lower() == READ_MESSAGES_COMMAND:
+            message_result = read_authorized_messages()
+            if voice:
+                voice.speak(message_result)
+            else:
+                print(f"Messages:\n{message_result}\n")
+            continue
+
+        if user_input.lower() == PLUGINS_COMMAND:
+            plugin_result = list_plugin_controls()
+            if voice:
+                voice.speak(plugin_result)
+            else:
+                print(f"Plugins:\n{plugin_result}\n")
             continue
 
         if user_input.lower().startswith(SCAN_PREFIX):
@@ -1117,7 +1407,7 @@ def chatbox(mode="text"):
             continue
 
         if voice:
-            action, request = parse_voice_action(user_input)
+            action, request = voice_action, voice_request
             if action == "scan":
                 voice.speak(scan_authorized_url(request))
                 continue
@@ -1138,6 +1428,24 @@ def chatbox(mode="text"):
                 continue
             if action == "write":
                 voice.speak(write_authorized_content(request))
+                continue
+            if action == "write-code":
+                voice.speak(write_code_plugin(request))
+                continue
+            if action == "concept":
+                voice.speak(coding_concept(request))
+                continue
+            if action == "type-message":
+                voice.speak(type_authorized_message(request))
+                continue
+            if action == "read-messages":
+                voice.speak(read_authorized_messages())
+                continue
+            if action == "setup":
+                voice.speak(setup_app_project(request))
+                continue
+            if action == "terminal":
+                voice.speak(run_authorized_command(request))
                 continue
 
         messages.append({"role": "user", "content": user_input})
@@ -1214,5 +1522,3 @@ if __name__ == "__main__":
     except RuntimeError as exc:
         print(f"\nERROR: {exc}\n")
         print("Install dependencies with: pip install -r requirements.txt")
-
-        
